@@ -1,0 +1,32 @@
+# Documentación interna: no se versiona
+*.md
+!README.md
+
+# Datos: nunca versionar archivos de usuario ni bases locales
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+~$*
+*.db
+*.db-*
+*.db.bak-*
+*.sqlite
+*.sqlite3
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Empaquetado
+build/
+dist/
+
+# Sistema
+.DS_Store
+Thumbs.db
+.claude/

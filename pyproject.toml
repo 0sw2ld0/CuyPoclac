@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cuypoclac"
+version = "0.1.0"
+description = "Aplicación de escritorio para consolidar y consultar información tomada de archivos Excel."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openpyxl>=3.1,<4",
+    "defusedxml>=0.7,<1",
+    "xlrd>=2.0,<3",
+    "msgspec>=0.18,<1",
+    "rapidfuzz>=3,<4",
+    "watchdog>=4,<8",
+    "PySide6-Essentials>=6.7,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+encryption = ["sqlcipher3-wheels", "argon2-cffi>=23"]
+
+[project.scripts]
+cuypoclac-cli = "cuypoclac.__main__:main"
+
+[project.gui-scripts]
+cuypoclac = "cuypoclac.app:main"
+
+[tool.setuptools.packages.find]
+include = ["cuypoclac*"]
+
+[tool.setuptools.package-data]
+cuypoclac = ["db/migrations_sql/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
