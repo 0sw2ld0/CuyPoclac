@@ -223,6 +223,7 @@ class SchemaPage(QWidget):
         ):
             return
         ctx = self._ctx
+        ctx.stop_agent_api()
         ctx.pool.waitForDone(10000)
         current = repo.current_schema(ctx.conn, ctx.workspace_id) if ctx.workspace_id else None
         db.backup(ctx.conn, ctx.db_path, current.version if current else 0)
@@ -252,6 +253,7 @@ class SchemaPage(QWidget):
         ):
             return
         ctx = self._ctx
+        ctx.stop_agent_api()
         ctx.stop_watching()
         ctx.pool.waitForDone(10000)
         ctx.conn.close()

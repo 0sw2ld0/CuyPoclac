@@ -1,5 +1,7 @@
 """Asistente de migración: revisar, simular y solo entonces aplicar."""
 
+import logging
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
@@ -12,6 +14,8 @@ from ...migration.dry_run import dry_run
 from ...migration.ops import apply_ops_to_schema
 from ...schema.diff import Proposal
 from ..widgets.common import CONFIDENCE_LABELS, TYPE_LABELS, confirm, muted_label, show_error, title_label
+
+logger = logging.getLogger(__name__)
 
 
 class ManualOpDialog(QDialog):
@@ -259,6 +263,7 @@ class MigrationWizard(QDialog):
         try:
             simulation = dry_run(self._ctx.conn, self._ctx.workspace_id, self._schema, ops)
         except (KeyError, ValueError) as error:
+            logger.warning("Simulación no compatible", exc_info=True)
             show_error(self, f"Las operaciones elegidas no son compatibles: {error}")
             return
         effects = {id(op): stats for op, stats in simulation.stats}
@@ -292,6 +297,7 @@ class MigrationWizard(QDialog):
                 ctx.conn, ctx.db_path, ctx.workspace_id, self.selected_ops(), self._plan.fingerprint or None
             )
         except Exception as error:
+            logger.exception("La migración se revirtió")
             show_error(self, f"La migración se revirtió y los datos no cambiaron.\n\n{error}")
             return
         self.accept()

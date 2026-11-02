@@ -218,3 +218,71 @@ def test_watcher_triggers_rescan(window, qapp):
             break
     settle(window, qapp)
     assert window.home.cards["records"]._value.text() == "6"
+
+
+def test_log_page_shows_the_log_when_opened(window, qapp, tmp_path, monkeypatch):
+    from cuypoclac import applog
+
+    monkeypatch.setenv("CUYPOCLAC_DATA_DIR", str(tmp_path))
+    applog.log_dir().mkdir()
+    applog.log_path().write_text(
+        "2026-01-01 10:00:00,000 INFO     cuypoclac: abierto\n"
+        "2026-01-01 10:00:01,000 ERROR    cuypoclac: fallido\n",
+        encoding="utf-8",
+    )
+    labels = [window.nav.item(i).text() for i in range(window.nav.count())]
+    window.nav.setCurrentRow(labels.index("Log"))
+    qapp.processEvents()
+    assert "abierto" in window.log.text.toPlainText()
+    window.log.only_problems.setChecked(True)
+    assert "abierto" not in window.log.text.toPlainText()
+    assert "fallido" in window.log.text.toPlainText()
+    shot(window, "log")
+
+
+def test_agent_page_saves_fields_and_toggles_api(window, qapp, tmp_path):
+    from cuypoclac.agent import config
+
+    page = window.agent
+    labels = [window.nav.item(i).text() for i in range(window.nav.count())]
+    window.nav.setCurrentRow(labels.index("Agente"))
+    qapp.processEvents()
+    rows = {page.table.item(r, 0).text(): r for r in range(page.table.rowCount())}
+    assert page.table.cellWidget(rows["Cantidad"], 4).isEnabled()
+    assert not page.table.cellWidget(rows["Fecha"], 4).isEnabled()
+
+    page.table.item(rows["Nivel"], 2).setCheckState(Qt.CheckState.Checked)
+    page.table.cellWidget(rows["Cantidad"], 4).setCurrentIndex(1)
+    assert page.table.item(rows["Cantidad"], 2).checkState() == Qt.CheckState.Checked
+    page.table.item(rows["Código"], 2).setCheckState(Qt.CheckState.Checked)
+    page.table.item(rows["Código"], 3).setCheckState(Qt.CheckState.Checked)
+    assert page.table.item(rows["Código"], 2).checkState() == Qt.CheckState.Unchecked
+
+    # Un escaneo en segundo plano no borra lo marcado sin guardar.
+    page.table.item(rows["Fecha"], 2).setCheckState(Qt.CheckState.Checked)
+    window.ctx.data_changed.emit()
+    assert page.table.item(rows["Fecha"], 2).checkState() == Qt.CheckState.Checked
+    page.table.item(rows["Fecha"], 2).setCheckState(Qt.CheckState.Unchecked)
+
+    page.save()
+    fields = config.get_fields(window.ctx.conn, window.ctx.workspace_id)
+    assert len(fields[config.ROLE_SHARED]) == 2
+    assert len(fields[config.ROLE_PERSON]) == 1
+    assert len(fields[config.ROLE_HIGHER_BETTER]) == 1
+
+    page.port.setValue(38765)
+    page.api_toggle.setChecked(True)
+    assert window.ctx.agent_server is not None
+    assert "38765" in page.api_status.text()
+    shot(window, "agente")
+
+    page.create_project_at(tmp_path / "proyecto")
+    assert (tmp_path / "proyecto" / "AGENTS.md").exists()
+    old = (tmp_path / "proyecto" / ".cuypoclac" / "curl.cfg").read_text(encoding="utf-8")
+    page.rotate()
+    assert (tmp_path / "proyecto" / ".cuypoclac" / "curl.cfg").read_text(encoding="utf-8") != old
+    assert window.ctx.agent_server.token in (tmp_path / "proyecto" / ".cuypoclac" / "curl.cfg").read_text(encoding="utf-8")
+
+    window.ctx.stop_agent_api()
+    assert not page.api_toggle.isChecked()
+    assert page.api_status.text() == "Apagada"

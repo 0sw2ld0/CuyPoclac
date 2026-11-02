@@ -1,12 +1,17 @@
 """Estado compartido de la interfaz y tareas en segundo plano."""
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
 from .. import db
+from ..agent import config as agent_config
+from ..agent.server import AgentServer
 from ..db import repo
 from ..importing.watcher import FolderWatcher
+
+logger = logging.getLogger(__name__)
 
 
 class _TaskSignals(QObject):
@@ -27,6 +32,7 @@ class _Task(QRunnable):
             conn = db.connect(self._ctx.db_path, self._ctx.key)
             result = self._fn(conn, self.signals.progress.emit)
         except Exception as error:  # Se muestra al usuario: la tarea no debe matar la app.
+            logger.exception("Falló una tarea en segundo plano")
             self.signals.failed.emit(self._error, str(error) or type(error).__name__)
         else:
             self.signals.finished.emit(self._done, result)
@@ -41,6 +47,7 @@ class AppContext(QObject):
     folder_changed = Signal()
     busy_changed = Signal(bool)
     progress = Signal(object)
+    agent_api_changed = Signal()
 
     def __init__(self, db_path: Path, key: str | None = None) -> None:
         super().__init__()
@@ -50,6 +57,7 @@ class AppContext(QObject):
         self.workspace_id: int | None = None
         self.folder: Path | None = None
         self.watcher: FolderWatcher | None = None
+        self.agent_server: AgentServer | None = None
         self.pool = QThreadPool(self)
         self._running = 0
         last = repo.last_workspace(self.conn)
@@ -57,8 +65,10 @@ class AppContext(QObject):
             self.workspace_id, self.folder = last
 
     def set_folder(self, folder: Path) -> None:
+        self.stop_agent_api()
         self.workspace_id = repo.get_or_create_workspace(self.conn, folder)
         self.folder = folder.resolve()
+        logger.info("Carpeta de trabajo: %s", self.folder)
         self.start_watching()
         self.workspace_changed.emit()
 
@@ -70,12 +80,27 @@ class AppContext(QObject):
                 self.watcher.start()
             except OSError:
                 # Sin vigilancia aún se puede escanear a mano.
+                logger.warning("No se pudo vigilar la carpeta", exc_info=True)
                 self.watcher = None
 
     def stop_watching(self) -> None:
         if self.watcher is not None:
             self.watcher.stop()
             self.watcher = None
+
+    def start_agent_api(self) -> None:
+        self.stop_agent_api()
+        settings = agent_config.get_settings(self.conn, self.workspace_id)
+        server = AgentServer(self.db_path, self.key, self.workspace_id, settings.token, settings.port)
+        server.start()
+        self.agent_server = server
+        self.agent_api_changed.emit()
+
+    def stop_agent_api(self) -> None:
+        if self.agent_server is not None:
+            self.agent_server.stop()
+            self.agent_server = None
+            self.agent_api_changed.emit()
 
     def run(self, fn, done=None, error=None) -> None:
         """Ejecuta fn(conn, progress) en otro hilo, con su propia conexión."""
@@ -110,6 +135,7 @@ class AppContext(QObject):
         self.workspace_changed.emit()
 
     def shutdown(self) -> None:
+        self.stop_agent_api()
         self.stop_watching()
         self.pool.waitForDone(10000)
         self.conn.close()

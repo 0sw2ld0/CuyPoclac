@@ -1,19 +1,25 @@
 """Ventana principal: navegación entre páginas y asistente de migración."""
 
+import logging
+
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (
     QHBoxLayout, QInputDialog, QListWidget, QMainWindow, QMessageBox, QStackedWidget, QStatusBar, QWidget,
 )
 
 from .context import AppContext
+from .pages.agent import AgentPage
 from .pages.dashboard import DashboardPage
 from .pages.export import ExportPage
 from .pages.files import FilesPage
 from .pages.home import HomePage
+from .pages.log import LogPage
 from .pages.migration_wizard import MigrationWizard
 from .pages.records import RecordsPage
 from .pages.schema import SchemaPage
 from .widgets.common import show_error
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -29,6 +35,8 @@ class MainWindow(QMainWindow):
         self.schema = SchemaPage(ctx)
         self.dashboard = DashboardPage(ctx)
         self.export = ExportPage(ctx, self.records.current_query)
+        self.agent = AgentPage(ctx)
+        self.log = LogPage(ctx)
 
         self.nav = QListWidget()
         self.nav.setFixedWidth(170)
@@ -36,7 +44,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         for label, page in (
             ("Inicio", self.home), ("Registros", self.records), ("Archivos", self.files),
-            ("Esquema", self.schema), ("Tablero", self.dashboard), ("Exportar", self.export),
+            ("Esquema", self.schema), ("Tablero", self.dashboard), ("Exportar", self.export), ("Agente", self.agent), ("Log", self.log),
         ):
             self.nav.addItem(label)
             self.stack.addWidget(page)
@@ -84,6 +92,7 @@ class MainWindow(QMainWindow):
         try:
             wizard = MigrationWizard(self.ctx, self, rel_path)
         except Exception as error:
+            logger.exception("No se pudo preparar la migración de %s", rel_path)
             show_error(self, f"No se pudo leer la estructura del archivo.\n\n{error}")
             return
         if wizard.exec() and wizard.backup_path:

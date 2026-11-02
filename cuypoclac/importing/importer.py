@@ -2,16 +2,15 @@
 
 import hashlib
 import json
+import logging
 import time
+import traceback
 import unicodedata
-import zipfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime, time as dt_time
 from pathlib import Path
-
-from openpyxl.utils.exceptions import InvalidFileException
 
 from .. import db
 from ..db import repo
@@ -21,13 +20,17 @@ from ..excel.reader import iter_rows
 from ..excel.workbook import SUPPORTED_SUFFIXES
 from ..migration.apply import migration_chain
 from ..migration.ops import apply_chain, convert_value
-from ..schema.discovery import DiscoveryError, discover
+from ..schema.discovery import discover
 from ..schema.model import SchemaCandidate
 from ..schema.normalize import normalize_label
 
 _TOTAL_WORDS = {"total", "totales", "subtotal", "suma", "gran total", "promedio"}
 _READ_RETRIES = 3
-_READ_ERRORS = (OSError, DiscoveryError, InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, IndexError)
+
+logger = logging.getLogger(__name__)
+# Los bloqueados se reintentan cada poco: el mismo fallo se registra una vez por sesión.
+_reported: set[tuple[Path, str, str]] = set()
+_last_summary: dict[Path, tuple] = {}
 
 
 @dataclass
@@ -36,6 +39,15 @@ class ParsedFile:
     samples: dict[str, list[str]]
     # (fila, {clave de campo candidato: [(índice de ítem, valor)]})
     rows: list[tuple[int, dict[str, list[tuple[int, object]]]]]
+    seconds: float = 0.0
+
+
+@dataclass
+class ParseFailure:
+    """Viaja desde el proceso lector, que no escribe en el log."""
+
+    message: str
+    details: str
 
 
 @dataclass
@@ -47,6 +59,27 @@ class ScanSummary:
     missing: int = 0
     records: int = 0
     pending: list[str] = dc_field(default_factory=list)
+
+
+def _first_report(path: Path, digest: str, status: str) -> bool:
+    key = (path, digest, status)
+    if key in _reported:
+        return False
+    _reported.add(key)
+    return True
+
+
+def _log_summary(folder: Path, summary: ScanSummary) -> None:
+    counts = (
+        summary.imported, summary.unchanged, summary.locked, summary.errors,
+        summary.missing, len(summary.pending), summary.records,
+    )
+    if _last_summary.get(folder) != counts:
+        _last_summary[folder] = counts
+        logger.info(
+            "Escaneo terminado: %d importados, %d sin cambios, %d en uso, %d con error, %d no encontrados, %d pendientes, %d registros",
+            *counts,
+        )
 
 
 def file_hash(path: Path) -> str:
@@ -369,6 +402,7 @@ def _handle_missing(conn, workspace_id: int, present: set[str], summary: ScanSum
             for record in conn.execute("SELECT id FROM record WHERE source_file_id = ?", (row["id"],)).fetchall():
                 _retire_record(conn, record["id"], row["id"], None)
             conn.execute("UPDATE source_file SET status = 'missing' WHERE id = ?", (row["id"],))
+            logger.warning("Ya no está en la carpeta: %s", row["rel_path"])
             _set_issues(conn, row["id"], [(None, None, "warning", "missing", "El archivo ya no está en la carpeta.")])
         summary.missing += 1
 
@@ -432,12 +466,16 @@ def scan_workspace(conn, workspace_id: int, *, workers: int = 0, progress=None) 
         previous = known.get(rel_path)
         if is_locked(path):
             _record_failure(conn, workspace_id, rel_path, previous["file_hash"] if previous else "", "locked", None)
+            if _first_report(path, previous["file_hash"] if previous else "", "locked"):
+                logger.warning("En uso, se reintentará: %s", rel_path)
             summary.locked += 1
             continue
         try:
             digest = file_hash(path)
         except OSError as error:
             _record_failure(conn, workspace_id, rel_path, "", "error", f"No se pudo leer el archivo: {error.strerror or error}")
+            if _first_report(path, "", "unreadable"):
+                logger.error("No se pudo leer %s", rel_path, exc_info=error)
             summary.errors += 1
             continue
         retry = previous and previous["status"] in {"locked", "pending_migration", "error", "missing"}
@@ -446,12 +484,20 @@ def scan_workspace(conn, workspace_id: int, *, workers: int = 0, progress=None) 
             continue
         to_parse.append((rel_path, path, digest))
 
+    new_files = sum(
+        (path, digest, "error") not in _reported and (path, digest, "pending") not in _reported
+        for _, path, digest in to_parse
+    )
+    if new_files:
+        logger.info("Abriendo %d archivos de %s", new_files, folder)
     results = _parse_all([item[1] for item in to_parse], workers)
-    for index, ((rel_path, _, digest), parsed) in enumerate(zip(to_parse, results), start=1):
+    for index, ((rel_path, path, digest), parsed) in enumerate(zip(to_parse, results), start=1):
         if progress:
             progress(index, len(to_parse), rel_path)
-        if isinstance(parsed, Exception):
-            _record_failure(conn, workspace_id, rel_path, digest, "error", _describe(parsed))
+        if isinstance(parsed, ParseFailure):
+            if _first_report(path, digest, "error"):
+                logger.error("No se pudo abrir %s\n%s", rel_path, parsed.details.rstrip())
+            _record_failure(conn, workspace_id, rel_path, digest, "error", f"No se pudo leer el archivo. {parsed.message}")
             summary.errors += 1
             continue
         version_id = find_version(conn, workspace_id, parsed.candidate)
@@ -460,9 +506,19 @@ def scan_workspace(conn, workspace_id: int, *, workers: int = 0, progress=None) 
                 version_id = repo.create_first_version(conn, workspace_id, parsed.candidate)
         if version_id is None:
             _record_failure(conn, workspace_id, rel_path, digest, "pending_migration", None)
+            if _first_report(path, digest, "pending"):
+                logger.warning("Estructura nueva, migración pendiente: %s", rel_path)
             summary.pending.append(rel_path)
             continue
-        _import_parsed(conn, workspace_id, rel_path, digest, parsed, version_id)
+        try:
+            _import_parsed(conn, workspace_id, rel_path, digest, parsed, version_id)
+        except Exception:
+            logger.exception("No se pudo guardar %s", rel_path)
+            raise
+        logger.info(
+            "Abierto %s: %d campos, %d filas, %.2f s",
+            rel_path, len(parsed.candidate.fields), len(parsed.rows), parsed.seconds,
+        )
         summary.imported += 1
     refresh_duplicates(conn, workspace_id)
     summary.records = conn.execute(
@@ -473,6 +529,7 @@ def scan_workspace(conn, workspace_id: int, *, workers: int = 0, progress=None) 
         (workspace_id,),
     ).fetchall()
     summary.pending = [r["rel_path"] for r in pending]
+    _log_summary(folder, summary)
     return summary
 
 
@@ -486,13 +543,11 @@ def _parse_all(paths: list[Path], workers: int) -> list:
 
 
 def _safe_parse(path: Path):
+    """Un archivo raro, falle como falle, no debe detener el resto del escaneo."""
+    started = time.perf_counter()
     try:
-        return parse_file(path)
-    except _READ_ERRORS as error:
-        return RuntimeError(f"{type(error).__name__}: {error}")
-
-
-def _describe(error: Exception) -> str:
-    return f"No se pudo leer el archivo. {error}"
-
-
+        parsed = parse_file(path)
+    except Exception as error:
+        return ParseFailure(f"{type(error).__name__}: {error}", traceback.format_exc())
+    parsed.seconds = time.perf_counter() - started
+    return parsed

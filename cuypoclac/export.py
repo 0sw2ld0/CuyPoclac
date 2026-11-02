@@ -1,5 +1,6 @@
 """Exporta un Excel consolidado con encabezados agrupados y combos."""
 
+import logging
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ _HEADER = PatternFill("solid", fgColor="DDE7F0")
 _BOLD = Font(bold=True)
 _INLINE_LIMIT = 255
 _PAGE = 2000
+
+logger = logging.getLogger(__name__)
 
 
 class ExportError(Exception):
@@ -66,6 +69,7 @@ def export_workspace(conn, workspace_id: int, target: Path, query: RecordQuery |
     for c in range(1, len(columns) + 1):
         ws.column_dimensions[get_column_letter(c)].width = 18
     wb.save(target)
+    logger.info("Exportados %d registros a %s", len(records), target)
     return len(records)
 
 

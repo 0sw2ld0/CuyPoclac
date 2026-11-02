@@ -172,6 +172,8 @@ def delete_manual(conn, record_id: int) -> None:
 def set_roles(conn, workspace_id: int, roles: dict[str, list[str]]) -> None:
     schema = repo.current_schema(conn, workspace_id)
     current = repo.get_roles(conn, schema.version_id)
+    # Cada pantalla guarda sus roles sin borrar los de la otra.
+    roles = {**current, **roles}
     if current.get("key") and current.get("key") != roles.get("key"):
         has_edits = conn.execute(
             """SELECT 1 FROM record_edit e JOIN record r ON r.id = e.record_id

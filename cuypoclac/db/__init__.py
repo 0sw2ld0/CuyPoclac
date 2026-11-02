@@ -1,5 +1,6 @@
 """Conexión a la base local: ubicación, migraciones internas, cifrado y backups."""
 
+import logging
 import os
 import shutil
 import sqlite3
@@ -13,9 +14,11 @@ _MIGRATIONS = Path(__file__).parent / "migrations_sql"
 _PLAIN_HEADER = b"SQLite format 3\x00"
 DB_NAME = "cuypoclac.db"
 
+logger = logging.getLogger(__name__)
 
-def default_db_path() -> Path:
-    """La base vive fuera de la carpeta de trabajo: esa carpeta nunca se modifica."""
+
+def data_dir() -> Path:
+    """Los datos viven fuera de la carpeta de trabajo: esa carpeta nunca se modifica."""
     override = os.environ.get("CUYPOCLAC_DATA_DIR")
     if override:
         base = Path(override)
@@ -26,7 +29,11 @@ def default_db_path() -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "cuypoclac"
     base.mkdir(parents=True, exist_ok=True)
-    return base / DB_NAME
+    return base
+
+
+def default_db_path() -> Path:
+    return data_dir() / DB_NAME
 
 
 def is_encrypted(path: Path) -> bool:
@@ -79,6 +86,20 @@ def connect(path: Path, key: str | None = None):
     return conn
 
 
+def connect_readonly(path: Path, key: str | None = None):
+    """Para quien solo consulta: la base rechaza cualquier escritura."""
+    if key is not None:
+        import sqlcipher3 as module
+    else:
+        module = sqlite3
+    conn = module.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5, isolation_level=None)
+    conn.row_factory = module.Row
+    if key is not None:
+        conn.execute(f"PRAGMA key = \"x'{key}'\"")
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 def _apply_internal_migrations(conn) -> None:
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     for script in sorted(_MIGRATIONS.glob("*.sql")):
@@ -110,6 +131,7 @@ def backup(conn, path: Path, version: int) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     target = path.with_name(f"{path.name}.bak-v{version}-{stamp}")
     shutil.copy2(path, target)
+    logger.info("Backup creado: %s", target.name)
     return target
 
 
@@ -124,6 +146,7 @@ def restore_backup(path: Path, backup_path: Path) -> None:
         if side.exists():
             side.unlink()
     shutil.copy2(backup_path, path)
+    logger.info("Base restaurada desde el backup: %s", backup_path.name)
 
 
 def enable_encryption(path: Path, password: str) -> str:
@@ -152,4 +175,5 @@ def enable_encryption(path: Path, password: str) -> str:
     for old in list_backups(path):
         if not is_encrypted(old):
             old.unlink()
+    logger.info("Base cifrada")
     return key

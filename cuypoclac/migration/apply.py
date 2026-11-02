@@ -1,6 +1,7 @@
 """Propone y aplica migraciones: siempre con backup y dentro de una transacción."""
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from ..db.repo import Schema
 from ..schema.diff import Proposal, diff_schemas
 from ..schema.discovery import discover
 from .ops import apply_chain, apply_ops_to_schema, compile_ops, sort_ops
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,6 +98,7 @@ def apply_migration(conn, db_path: Path, workspace_id: int, ops: list[dict], fin
         _migrate_edits(conn, workspace_id, compiled)
         repo.recompute_keys(conn, workspace_id, roles.get("key", []))
         repo.rebuild_filter_indexes(conn, version_id)
+    logger.info("Migración aplicada: versión %d a %d, %d operaciones", schema.version, next_version, len(ops))
     return backup_path
 
 

@@ -13,6 +13,8 @@
 *.db.bak-*
 *.sqlite
 *.sqlite3
+*.log
+*.log.*
 
 # Python
 .venv/
