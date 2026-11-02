@@ -43,6 +43,12 @@ Generar la aplicación empaquetada, en el mismo sistema donde se usará:
 .venv/bin/pyinstaller packaging/cuypoclac.spec --noconfirm
 ```
 
+## Carpetas
+
+Para trabajar con otra carpeta, pulsa **Elegir carpeta…** en **Inicio**. Cada carpeta conserva sus datos por separado y, al abrir la app, se carga la última que usaste.
+
+**Quitar carpeta…** borra de la base los datos de la carpeta actual, incluidas las ediciones y los registros manuales. Antes guarda un backup, que se puede restaurar desde **Esquema** y sigue conteniendo esos datos. La carpeta y sus archivos no se tocan.
+
 ## Agente
 
 La pantalla **Agente** permite consultar los datos desde un agente de VS Code mediante una API local y curl:

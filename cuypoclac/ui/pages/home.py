@@ -1,16 +1,19 @@
 """Inicio: elegir carpeta, escanear y ver el resumen."""
 
+import logging
 import os
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
-    QFileDialog, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QFileDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ...importing.importer import scan_workspace
 from ...query import workspace_summary
-from ..widgets.common import StatCard, muted_label, show_error, title_label
+from ..widgets.common import StatCard, confirm, muted_label, show_error, title_label
+
+logger = logging.getLogger(__name__)
 
 _RETRY_MS = 30000
 
@@ -33,9 +36,12 @@ class HomePage(QWidget):
         row.addWidget(self.folder_label, 1)
         choose = QPushButton("Elegir carpeta…")
         choose.clicked.connect(self._choose)
+        self.remove_button = QPushButton("Quitar carpeta…")
+        self.remove_button.clicked.connect(self._remove)
         self.scan_button = QPushButton("Escanear")
         self.scan_button.clicked.connect(self.scan)
         row.addWidget(choose)
+        row.addWidget(self.remove_button)
         row.addWidget(self.scan_button)
         layout.addLayout(row)
 
@@ -73,6 +79,7 @@ class HomePage(QWidget):
         ctx.progress.connect(self._on_progress)
         ctx.data_changed.connect(self.refresh)
         ctx.workspace_changed.connect(self.refresh)
+        ctx.busy_changed.connect(lambda _: self._update_remove())
         self._retry = QTimer(self)
         self._retry.setInterval(_RETRY_MS)
         self._retry.timeout.connect(self._retry_blocked)
@@ -88,6 +95,42 @@ class HomePage(QWidget):
     def open_folder(self, folder: Path) -> None:
         self._ctx.set_folder(folder)
         self.scan()
+
+    def _update_remove(self) -> None:
+        self.remove_button.setEnabled(self._ctx.workspace_id is not None and not self._ctx.busy)
+
+    def _remove(self) -> None:
+        ctx = self._ctx
+        summary = workspace_summary(ctx.conn, ctx.workspace_id)
+        changes = ctx.conn.execute(
+            """SELECT (SELECT COUNT(*) FROM record WHERE workspace_id = :id AND origin = 'manual')
+                    + (SELECT COUNT(*) FROM record_edit e JOIN record r ON r.id = e.record_id WHERE r.workspace_id = :id)""",
+            {"id": ctx.workspace_id},
+        ).fetchone()[0]
+        if not confirm(
+            self, "Quitar carpeta",
+            f"Se quitará de CuyPoclac la carpeta:\n{ctx.folder}\n\n"
+            f"Se borrarán {summary['records']} registros y {changes} ediciones o registros manuales, "
+            "además de su esquema, sus migraciones y los ajustes del agente.\n\n"
+            "La carpeta y sus archivos no se tocan. Antes se guardará un backup, que seguirá conteniendo estos datos.",
+            "Quitar",
+        ):
+            return
+        try:
+            saved = self.remove_folder()
+        except Exception as error:
+            logger.exception("No se pudo quitar la carpeta")
+            show_error(self, f"La carpeta no se quitó.\n\n{error}")
+            return
+        QMessageBox.information(self, "Carpeta quitada", f"Se guardó un backup: {saved.name}")
+
+    def remove_folder(self) -> Path:
+        # Se revisa aquí porque una tarea pudo empezar mientras se confirmaba.
+        if self._ctx.busy:
+            raise RuntimeError("Hay una tarea en curso. Espera a que termine e inténtalo de nuevo.")
+        saved = self._ctx.remove_current_folder()
+        self.scan()
+        return saved
 
     def scan(self) -> None:
         if self._ctx.workspace_id is None:
@@ -150,7 +193,12 @@ class HomePage(QWidget):
 
     def refresh(self) -> None:
         ctx = self._ctx
+        self._update_remove()
         if ctx.workspace_id is None:
+            self.folder_label.setText("Ninguna carpeta seleccionada")
+            for card in self.cards.values():
+                card.set_value("—")
+            self.status.clear()
             self.pending_box.setVisible(False)
             return
         self.folder_label.setText(f"Carpeta: {ctx.folder}")

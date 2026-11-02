@@ -93,6 +93,7 @@ class AgentPage(QWidget):
 
     def reload(self) -> None:
         self._loaded = None
+        self.status.clear()
         self.refresh()
 
     def refresh(self) -> None:

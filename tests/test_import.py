@@ -6,6 +6,7 @@ import openpyxl
 import pytest
 
 from cuypoclac import db, records
+from cuypoclac.agent import config as agent_config
 from cuypoclac.db import repo
 from cuypoclac.export import ExportError, export_workspace
 from cuypoclac.importing.importer import scan_workspace
@@ -449,3 +450,49 @@ def test_encryption_round_trip(tmp_path):
     assert db.derive_key(path, "clave-de-prueba") == key
     with pytest.raises(Exception):
         db.connect(path, db.derive_key(path, "otra-clave"))
+
+
+def _workspace_rows(conn) -> dict[str, int]:
+    tables = [r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
+    return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
+
+
+def test_delete_workspace_removes_everything_of_that_folder_only(env, tmp_path):
+    conn, workspace, folder, _ = env
+    build_workbook(folder / "a.xlsx")
+    scan_workspace(conn, workspace, workers=1)
+    before = _workspace_rows(conn)
+
+    other_folder = tmp_path / "otra"
+    other_folder.mkdir()
+    build_workbook(other_folder / "b.xlsx")
+    (other_folder / "roto.xlsx").write_bytes(b"no es un excel")
+    other = repo.get_or_create_workspace(conn, other_folder)
+    scan_workspace(conn, other, workers=1)
+    version = repo.current_schema(conn, other).version_id
+    field = repo.current_schema(conn, other).active_fields[0].id
+    repo.add_alias(conn, other, "otro nombre", field)
+    conn.execute("INSERT INTO field_role VALUES (?, 'key', ?)", (version, field))
+    agent_config.get_settings(conn, other)
+    record = conn.execute("SELECT id FROM record WHERE workspace_id = ? LIMIT 1", (other,)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO record_edit(record_id, field_id, value, edited_at) VALUES (?, ?, 'x', '2026-01-01')", (record, field)
+    )
+
+    repo.delete_workspace(conn, other)
+
+    assert _workspace_rows(conn) == before
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert count_records(conn, workspace) == 3
+
+
+def test_removed_folder_can_be_added_again(env, tmp_path):
+    conn, workspace, folder, _ = env
+    build_workbook(folder / "a.xlsx")
+    scan_workspace(conn, workspace, workers=1)
+    repo.delete_workspace(conn, workspace)
+    assert repo.last_workspace(conn) is None
+    again = repo.get_or_create_workspace(conn, folder)
+    scan_workspace(conn, again, workers=1)
+    assert count_records(conn, again) == 3
+

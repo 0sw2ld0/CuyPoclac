@@ -60,17 +60,41 @@ class AppContext(QObject):
         self.agent_server: AgentServer | None = None
         self.pool = QThreadPool(self)
         self._running = 0
+        self._open_last()
+
+    @property
+    def busy(self) -> bool:
+        return self._running > 0
+
+    def _open_last(self) -> None:
         last = repo.last_workspace(self.conn)
-        if last:
-            self.workspace_id, self.folder = last
+        self.workspace_id, self.folder = last if last else (None, None)
 
     def set_folder(self, folder: Path) -> None:
         self.stop_agent_api()
         self.workspace_id = repo.get_or_create_workspace(self.conn, folder)
+        repo.touch_workspace(self.conn, self.workspace_id)
         self.folder = folder.resolve()
         logger.info("Carpeta de trabajo: %s", self.folder)
         self.start_watching()
         self.workspace_changed.emit()
+
+    def remove_current_folder(self) -> Path:
+        """Quita la carpeta de la base, sin tocar sus archivos. Devuelve el backup previo."""
+        self.stop_agent_api()
+        self.stop_watching()
+        try:
+            current = repo.current_schema(self.conn, self.workspace_id)
+            saved = db.backup(self.conn, self.db_path, current.version if current else 0)
+            repo.delete_workspace(self.conn, self.workspace_id)
+        except Exception:
+            self.start_watching()
+            raise
+        logger.info("Carpeta quitada: %s", self.folder)
+        self._open_last()
+        self.start_watching()
+        self.workspace_changed.emit()
+        return saved
 
     def start_watching(self) -> None:
         self.stop_watching()
@@ -132,6 +156,13 @@ class AppContext(QObject):
 
     def reconnect(self) -> None:
         self.conn = db.connect(self.db_path, self.key)
+        # El backup restaurado puede no tener la carpeta actual, o tenerla con otro id.
+        workspace = repo.find_workspace(self.conn, self.folder) if self.folder else None
+        if workspace is None:
+            self._open_last()
+        else:
+            self.workspace_id = workspace
+        self.start_watching()
         self.workspace_changed.emit()
 
     def shutdown(self) -> None:

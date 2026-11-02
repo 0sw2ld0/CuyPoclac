@@ -66,7 +66,8 @@ def confirm(parent: QWidget, title: str, message: str, accept: str = "Continuar"
     box.setWindowTitle(title)
     box.setText(message)
     yes = box.addButton(accept, QMessageBox.ButtonRole.AcceptRole)
-    box.addButton("Cancelar", QMessageBox.ButtonRole.RejectRole)
+    # Un Enter accidental no debe aceptar una acción que borra o reemplaza datos.
+    box.setDefaultButton(box.addButton("Cancelar", QMessageBox.ButtonRole.RejectRole))
     box.exec()
     return box.clickedButton() is yes
 

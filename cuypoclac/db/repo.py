@@ -8,7 +8,7 @@ from pathlib import Path
 from ..schema.diff import FieldDef, GroupDef
 from ..schema.model import SchemaCandidate
 from ..schema.normalize import normalize_label
-from . import now_iso
+from . import now_iso, transaction
 
 ROLES = ("key", "date", "owner", "filterable")
 _FIELD_ID = re.compile(r"^[fg]_\d+$")
@@ -54,9 +54,43 @@ def workspace_folder(conn, workspace_id: int) -> Path:
     return Path(conn.execute("SELECT folder_path FROM workspace WHERE id = ?", (workspace_id,)).fetchone()[0])
 
 
+def find_workspace(conn, folder: Path) -> int | None:
+    row = conn.execute("SELECT id FROM workspace WHERE folder_path = ?", (str(folder),)).fetchone()
+    return row["id"] if row else None
+
+
+def touch_workspace(conn, workspace_id: int) -> None:
+    """Un contador y no la hora: dos cambios en el mismo segundo también quedan en orden."""
+    conn.execute(
+        "UPDATE workspace SET last_used = (SELECT COALESCE(MAX(last_used), 0) + 1 FROM workspace) WHERE id = ?",
+        (workspace_id,),
+    )
+
+
 def last_workspace(conn) -> tuple[int, Path] | None:
-    row = conn.execute("SELECT id, folder_path FROM workspace ORDER BY id DESC LIMIT 1").fetchone()
+    row = conn.execute("SELECT id, folder_path FROM workspace ORDER BY last_used DESC, id DESC LIMIT 1").fetchone()
     return (row["id"], Path(row["folder_path"])) if row else None
+
+
+def delete_workspace(conn, workspace_id: int) -> None:
+    """Borra de la base todo lo de la carpeta, en el orden que piden las llaves foráneas."""
+    in_files = "source_file_id IN (SELECT id FROM source_file WHERE workspace_id = ?)"
+    in_versions = "schema_version_id IN (SELECT id FROM schema_version WHERE workspace_id = ?)"
+    with transaction(conn):
+        for statement in (
+            f"DELETE FROM import_issue WHERE {in_files}",
+            "DELETE FROM record WHERE workspace_id = ?",
+            "DELETE FROM source_file WHERE workspace_id = ?",
+            f"DELETE FROM field_role WHERE {in_versions}",
+            f"DELETE FROM field WHERE {in_versions}",
+            f"DELETE FROM field_group WHERE {in_versions}",
+            "DELETE FROM migration WHERE workspace_id = ?",
+            "DELETE FROM field_alias WHERE workspace_id = ?",
+            "DELETE FROM agent_settings WHERE workspace_id = ?",
+            "DELETE FROM schema_version WHERE workspace_id = ?",
+            "DELETE FROM workspace WHERE id = ?",
+        ):
+            conn.execute(statement, (workspace_id,))
 
 
 def load_schema(conn, version_id: int) -> Schema:

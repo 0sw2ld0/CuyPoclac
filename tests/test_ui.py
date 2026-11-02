@@ -220,6 +220,113 @@ def test_watcher_triggers_rescan(window, qapp):
     assert window.home.cards["records"]._value.text() == "6"
 
 
+def test_last_used_folder_opens_on_start(window, qapp, tmp_path):
+    first = window.ctx.folder
+    other = tmp_path / "otra"
+    other.mkdir()
+    window.home.open_folder(other)
+    settle(window, qapp)
+    window.home.open_folder(first)
+    settle(window, qapp)
+    reopened = AppContext(window.ctx.db_path)
+    assert reopened.folder == first
+    reopened.conn.close()
+
+
+def test_remove_folder_returns_to_previous_and_keeps_files(window, qapp, tmp_path, monkeypatch):
+    home, ctx = window.home, window.ctx
+    good = ctx.folder
+    wrong = tmp_path / "equivocada"
+    wrong.mkdir()
+    workbook = build_workbook(wrong / "b.xlsx")
+    content = workbook.read_bytes()
+    home.open_folder(wrong)
+    settle(window, qapp)
+    assert ctx.conn.execute("SELECT COUNT(*) FROM record").fetchone()[0] == 6
+
+    asked = []
+    monkeypatch.setattr("cuypoclac.ui.pages.home.confirm", lambda _p, _t, message, _a: asked.append(message) or False)
+    home._remove()
+    assert str(wrong) in asked[0] and ctx.folder == wrong
+
+    monkeypatch.setattr("cuypoclac.ui.pages.home.confirm", lambda *a: True)
+    shown = []
+    monkeypatch.setattr("cuypoclac.ui.pages.home.QMessageBox.information", lambda _p, _t, text: shown.append(text))
+    home._remove()
+    settle(window, qapp)
+
+    assert ctx.folder == good and home.cards["records"]._value.text() == "3"
+    assert ctx.conn.execute("SELECT COUNT(*) FROM record").fetchone()[0] == 3
+    assert workbook.read_bytes() == content
+    assert ctx.watcher is not None
+    assert len(db.list_backups(ctx.db_path)) == 1 and db.list_backups(ctx.db_path)[0].name in shown[0]
+
+
+def test_remove_only_folder_clears_every_page(window, qapp):
+    home, ctx = window.home, window.ctx
+    window.nav.setCurrentRow(1)
+    assert window.records.model.total == 3
+    home.remove_folder()
+    settle(window, qapp)
+    assert ctx.workspace_id is None and ctx.folder is None and ctx.watcher is None
+    assert home.folder_label.text() == "Ninguna carpeta seleccionada"
+    assert home.cards["records"]._value.text() == "—"
+    assert not home.remove_button.isEnabled()
+    assert window.records.model.total == 0 and window.files.files.rowCount() == 0
+    assert window.schema.table.rowCount() == 0 and window.agent.table.rowCount() == 0
+
+
+def test_remove_folder_waits_for_running_tasks(window, qapp):
+    ctx = window.ctx
+    ctx._running = 1
+    try:
+        with pytest.raises(RuntimeError):
+            window.home.remove_folder()
+    finally:
+        ctx._running = 0
+    assert ctx.conn.execute("SELECT COUNT(*) FROM record").fetchone()[0] == 3
+
+
+def test_remove_folder_stops_the_agent_api(window, qapp):
+    from cuypoclac.agent import config
+
+    ctx = window.ctx
+    config.set_port(ctx.conn, ctx.workspace_id, 38766)
+    ctx.start_agent_api()
+    assert ctx.agent_server is not None
+    window.home.remove_folder()
+    settle(window, qapp)
+    assert ctx.agent_server is None
+
+
+def test_failed_backup_keeps_the_folder(window, qapp, monkeypatch):
+    ctx = window.ctx
+    def fail(*_):
+        raise OSError("sin espacio")
+    monkeypatch.setattr("cuypoclac.ui.context.db.backup", fail)
+    with pytest.raises(OSError):
+        window.home.remove_folder()
+    assert ctx.conn.execute("SELECT COUNT(*) FROM record").fetchone()[0] == 3
+    assert ctx.workspace_id is not None and ctx.watcher is not None
+
+
+def test_restore_brings_back_removed_folder(window, qapp, monkeypatch):
+    ctx = window.ctx
+    folder = ctx.folder
+    saved = window.home.remove_folder()
+    settle(window, qapp)
+    assert ctx.workspace_id is None
+    window.schema.refresh()
+    page = window.schema
+    row = next(i for i in range(page.backups.count()) if page.backups.item(i).data(Qt.ItemDataRole.UserRole) == str(saved))
+    page.backups.setCurrentRow(row)
+    monkeypatch.setattr("cuypoclac.ui.pages.schema.confirm", lambda *a, **k: True)
+    page._restore()
+    settle(window, qapp)
+    assert ctx.folder == folder and window.home.cards["records"]._value.text() == "3"
+    assert ctx.watcher is not None
+
+
 def test_log_page_shows_the_log_when_opened(window, qapp, tmp_path, monkeypatch):
     from cuypoclac import applog
 
